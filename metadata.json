@@ -1,0 +1,6 @@
+{
+  "name": "沖縄三線工工四特訓・AI比嘉おじぃアドバイザー",
+  "description": "三線の音程をリアルタイム検出して工工四と勘所（フィンガリング）をガイド。沖縄の民謡唄者「比嘉おじぃ」があなたの演奏の癖を聞き取ってボイス＆テキストでアドバイスしてくれる、初心者向けの特訓アプリケーション。",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
