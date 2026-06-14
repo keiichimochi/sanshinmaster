@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { ChiiTuning, TUNINGS, KUNKUNSHI_MAP, KunkunshiMeta, Song, TrackedPlay } from "../types";
-import { Volume2, VolumeX, Mic, Compass, Play, RotateCcw, Award, Sparkles, AlertCircle, Music, Radio, CheckCircle2 } from "lucide-react";
+import { Volume2, VolumeX, Mic, Compass, Play, RotateCcw, Award, Sparkles, AlertCircle, Music, Radio, CheckCircle2, Trophy, Timer, Zap, HelpCircle } from "lucide-react";
 
 interface TunerProps {
   activeSong: Song;
@@ -41,9 +41,24 @@ export default function Tuner({
   // Audio energy monitor level (dB or RMS representation)
   const [rmsVolume, setRmsVolume] = useState<number>(0);
 
-  // Tuner function mode: "practice" is original scrolling kunkunshi, "chindami" is new dedicated tuner!
-  const [tunerMode, setTunerMode] = useState<"practice" | "chindami">("practice");
+  // Tuner function mode: "practice" is original scrolling kunkunshi, "chindami" is new dedicated tuner, "game" is kunkunshi game
+  const [tunerMode, setTunerMode] = useState<"practice" | "chindami" | "game">("practice");
   const [stringToTune, setStringToTune] = useState<0 | 1 | 2>(0); // 0: 男弦 (Low), 1: 中弦 (Mid), 2: 女弦 (High)
+
+  // Game Mode States for Ultra-Beginners
+  const [gameDifficulty, setGameDifficulty] = useState<"beginner" | "easy" | "medium" | "hard">("easy");
+  const [gamePlayStatus, setGamePlayStatus] = useState<"idle" | "playing" | "success" | "fail">("idle");
+  const [gameTargetNote, setGameTargetNote] = useState<string>("四");
+  const [gameScore, setGameScore] = useState<number>(0);
+  const [gameCombo, setGameCombo] = useState<number>(0);
+  const [gameMaxCombo, setGameMaxCombo] = useState<number>(0);
+  const [gameTotalTurns, setGameTotalTurns] = useState<number>(0);
+  const [gameTimeLeft, setGameTimeLeft] = useState<number>(15);
+  const [gameLevel, setGameLevel] = useState<number>(1);
+  const [lastCorrectNote, setLastCorrectNote] = useState<string | null>(null);
+  const [lastIncorrectPlayed, setLastIncorrectPlayed] = useState<string | null>(null);
+  const [gameFeedback, setGameFeedback] = useState<string>("「スタート」ボタンを押して、勘所あてゲームを始めるさぁ！");
+  const [gameStreakMilestone, setGameStreakMilestone] = useState<boolean>(false);
 
   // Practice controller state
   const [practiceIndex, setPracticeIndex] = useState(0);
@@ -89,6 +104,199 @@ export default function Tuner({
   useEffect(() => {
     resetPractice();
   }, [activeSong]);
+
+  // Game countdown timer
+  useEffect(() => {
+    let timer: any = null;
+    if (tunerMode === "game" && gamePlayStatus === "playing" && isPlaying) {
+      timer = setInterval(() => {
+        setGameTimeLeft(prev => {
+          if (prev <= 1) {
+            handleGameTimeout();
+            return 15;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    }
+    return () => {
+      if (timer) clearInterval(timer);
+    };
+  }, [tunerMode, gamePlayStatus, isPlaying]);
+
+  // Stop game mode operations when mode changes to something else
+  useEffect(() => {
+    if (tunerMode !== "game") {
+      stopGameMode();
+    } else {
+      // Transition key setups
+      setGamePlayStatus("idle");
+      setGameCombo(0);
+      setGameScore(0);
+      setGameFeedback("「スタート」ボタンを押して、勘所あてゲームを始めるさぁ！");
+    }
+  }, [tunerMode]);
+
+  // Beginner-friendly Note sets per difficulty
+  const getGameNotes = (diff: typeof gameDifficulty) => {
+    switch (diff) {
+      case "beginner": // No-press / Open strings only! Highly intuitive!
+        return ["合", "四", "工"];
+      case "easy": // Standard basic notes (easy index strings)
+        return ["四", "上", "中", "工", "五", "六"];
+      case "medium": // Full basic kunkunshi notes
+        return ["合", "乙", "老", "四", "上", "中", "五", "六", "七", "工"];
+      case "hard": // Pro spectrum including tricky notes like Shaku, Hachi, Kyu
+        return ["合", "乙", "老", "四", "上", "中", "尺", "工", "五", "六", "七", "八", "九"];
+      default:
+        return ["四", "上", "中", "工", "五", "六"];
+    }
+  };
+
+  // Setup next random note targeting current difficulties
+  const nextGameQuestion = (currentDiff = gameDifficulty) => {
+    const pool = getGameNotes(currentDiff);
+    let randomNote = pool[Math.floor(Math.random() * pool.length)];
+    if (pool.length > 1) {
+      // Prevent immediate duplicate to keep it dynamic and engaging
+      const maxRetries = 10;
+      let retries = 0;
+      while (randomNote === gameTargetNote && retries < maxRetries) {
+        randomNote = pool[Math.floor(Math.random() * pool.length)];
+        retries++;
+      }
+    }
+    setGameTargetNote(randomNote);
+    
+    // Set timer based on difficulty
+    const timerDelay = currentDiff === "beginner" ? 20 : currentDiff === "easy" ? 15 : currentDiff === "medium" ? 12 : 8;
+    setGameTimeLeft(timerDelay);
+    
+    setGamePlayStatus("playing");
+    setLastIncorrectPlayed(null);
+  };
+
+  // Play reference note to guide beginners ear
+  const playReferencedGameNote = () => {
+    const targetFreq = getTuningFreqForNote(gameTargetNote);
+    if (targetFreq > 0) {
+      playReferenceTone(targetFreq);
+    }
+  };
+
+  // Helper to resolve specific note relative frequency
+  const getTuningFreqForNote = (noteChar: string): number => {
+    const meta = KUNKUNSHI_MAP[noteChar];
+    if (!meta || meta.semitonesFromMaleOpen === -1) return 0;
+    
+    // Low / male sound is standard root basis
+    const maleOpenFreq = selectedTuning.maleFreq;
+    return maleOpenFreq * Math.pow(2, meta.semitonesFromMaleOpen / 12);
+  };
+
+  // Process a successful note match (○)
+  const handleGameSuccess = (noteChar: string, pitch: number) => {
+    if (gamePlayStatus !== "playing") return;
+    
+    setGamePlayStatus("success");
+    setLastCorrectNote(noteChar);
+    setGameScore(s => s + 1);
+    
+    const nextCombo = gameCombo + 1;
+    setGameCombo(nextCombo);
+    if (nextCombo > gameMaxCombo) {
+      setGameMaxCombo(nextCombo);
+    }
+    setGameTotalTurns(t => t + 1);
+
+    // Dynamic level ups every 4 streaks
+    const nextLevel = Math.floor(nextCombo / 4) + 1;
+    if (nextLevel > gameLevel) {
+      setGameLevel(nextLevel);
+      setGameStreakMilestone(true);
+      setGameFeedback(`🎉 レベルアップ！Lv.${nextLevel}さぁ！指使いの上達がでーじ早いねぇ！`);
+      setTimeout(() => setGameStreakMilestone(false), 2000);
+    } else {
+      const compliments = ["上等さぁ！", "その調子！", "耳がいいねぇ！", "いーやーさーさー！", "完璧！合格さぁ！", "いい響き！"];
+      const randomCompliment = compliments[Math.floor(Math.random() * compliments.length)];
+      setGameFeedback(`⭕️ 正解！【${noteChar}】の音をピッタリ鳴らしたさぁ！${randomCompliment}`);
+    }
+
+    // Delay briefly to allow user to celebrate and read, then next
+    setTimeout(() => {
+      nextGameQuestion();
+    }, 1800);
+  };
+
+  // Process incorrect node pluck (❌)
+  const handleGameWrong = (playedChar: string, targetChar: string) => {
+    if (gamePlayStatus !== "playing") return;
+    
+    setGamePlayStatus("fail");
+    setLastIncorrectPlayed(playedChar);
+    setGameCombo(0); // reset streak immediately!
+    setGameTotalTurns(t => t + 1);
+
+    const metaPlayed = KUNKUNSHI_MAP[playedChar];
+    const metaTarget = KUNKUNSHI_MAP[targetChar];
+    let advisorTip = "";
+
+    if (metaPlayed && metaTarget) {
+      if (metaPlayed.stringIndex > metaTarget.stringIndex) {
+        advisorTip = "弾いている弦が右（細い弦）になってるさぁ。もう少し左（太い弦）を意識して弾いてみてね。";
+      } else if (metaPlayed.stringIndex < metaTarget.stringIndex) {
+        advisorTip = "弾いている弦が左（太い弦）になってるさぁ。もう少し右（細い弦）を意識して弾いてみてね。";
+      } else {
+        // Same string but wrong press height
+        if (metaPlayed.fingerIndex > metaTarget.fingerIndex) {
+          advisorTip = "押さえる指が少し下（チーガ／胴側）に行きすぎているさぁ。もう少し上（歌口側）を押さえてみてね。";
+        } else {
+          advisorTip = "押さえる指が少し上（カラクイ／歌口側）に行きすぎているさぁ。もう少し下（胴側）を押さえてみてね。";
+        }
+      }
+    }
+
+    setGameFeedback(`❌ 残念！いま鳴ったのは【${playedChar}】。お題は【${targetChar}】さぁ。${advisorTip}`);
+
+    // Standard short delay then let them try on the same target note to reinforce muscle memory!
+    setTimeout(() => {
+      setGamePlayStatus("playing");
+      setLastIncorrectPlayed(null);
+    }, 3000);
+  };
+
+  // Process when time runs out (⚠️)
+  const handleGameTimeout = () => {
+    setGamePlayStatus("fail");
+    setGameCombo(0);
+    setGameTotalTurns(t => t + 1);
+    setGameFeedback(`⏱️ タイムアップ！お題は【${gameTargetNote}】だったさぁ。次の問題に行くよ。`);
+
+    // Jump to next note automatically
+    setTimeout(() => {
+      nextGameQuestion();
+    }, 2000);
+  };
+
+  // Initialize/Reset whole game states
+  const startGameMode = (diff = gameDifficulty) => {
+    setGameScore(0);
+    setGameCombo(0);
+    setGameTotalTurns(0);
+    setGameLevel(1);
+    setLastIncorrectPlayed(null);
+    setLastCorrectNote(null);
+    setGameFeedback("ちばりよー！（がんばって！）マイクに音を拾わせて、お題の勘所を弾くさぁ！");
+    nextGameQuestion(diff);
+  };
+
+  // Tear down game session
+  const stopGameMode = () => {
+    setGamePlayStatus("idle");
+    setGameCombo(0);
+    setLastIncorrectPlayed(null);
+    setLastCorrectNote(null);
+  };
 
   // Clean active pitch tracker on unmount
   useEffect(() => {
@@ -347,6 +555,34 @@ export default function Tuner({
         if (meta) {
           setDetectedNote(meta);
         }
+      } else if (tunerMode === "game") {
+        // Interactive game mode evaluator
+        if (gamePlayStatus === "playing") {
+          const match = mapFrequencyToKunkunshi(frequency, selectedTuning);
+          if (match) {
+            setDetectedNote(match.meta);
+            setCentsOffset(match.cents);
+            
+            // Beginners need slightly wider cents tolerance (+-28c) for muscle confidence
+            const isPerfectForGame = Math.abs(match.cents) <= 28;
+            setIsNotePerfect(Math.abs(match.cents) <= 15);
+
+            if (match.meta.char === gameTargetNote) {
+              if (isPerfectForGame) {
+                handleGameSuccess(match.meta.char, frequency);
+              }
+            } else {
+              // Trigger wrong note if volume has high pluck rise to avoid transient noise failures
+              if (rmsVolume > 0.02 && Math.abs(match.cents) <= 32) {
+                handleGameWrong(match.meta.char, gameTargetNote);
+              }
+            }
+          } else {
+            setDetectedNote(null);
+            setCentsOffset(0);
+            setIsNotePerfect(false);
+          }
+        }
       } else {
         // Standard Practice scroll mode
         const match = mapFrequencyToKunkunshi(frequency, selectedTuning);
@@ -566,6 +802,21 @@ export default function Tuner({
             >
               ちんだみ（調弦）
             </button>
+            <button
+              onClick={() => {
+                setTunerMode("game");
+                setIsNotePerfect(false);
+                setDetectedNote(null);
+                setCentsOffset(0);
+              }}
+              className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all ${
+                tunerMode === "game"
+                  ? "bg-amber-600 text-slate-950"
+                  : "text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              🎮 勘所あてゲーム
+            </button>
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
@@ -777,7 +1028,7 @@ export default function Tuner({
               )}
             </div>
           </div>
-        ) : (
+        ) : tunerMode === "chindami" ? (
           /* NEW: Dedicated Chindami Tuning Mode layout (8 Columns) */
           <div className="lg:col-span-8 flex flex-col justify-between p-5 bg-slate-950/40 rounded-2xl border border-slate-800">
             <div>
@@ -925,6 +1176,345 @@ export default function Tuner({
 
             <div className="mt-4 pt-4 border-t border-slate-800/50 text-[10px] text-slate-500 leading-snug">
               ※ 本調子（ほんちょうし）は男弦、中弦を4度（5半音）、男弦、女弦を8度（12半音／完全オクターブ）にする沖縄伝統の最も代表的な三線の調律法です。
+            </div>
+
+            <div className="mt-4 pt-4 border-t border-slate-800/50 text-[10px] text-slate-500 leading-snug">
+              ※ 本調子（ほんちょうし）は男弦、中弦を4度（5半音）、男弦、女弦を8度（12半音／完全オクターブ）にする沖縄伝統の最も代表的な三線の調律法です。
+            </div>
+          </div>
+        ) : (
+          /* ==========================================
+             GAME MODE: Ultra-Beginner Intuitive Finger Placement Game (8 Columns)
+             ========================================== */
+          <div className="lg:col-span-8 flex flex-col justify-between p-5 bg-slate-950/45 rounded-2xl border border-slate-800 relative overflow-hidden">
+            <div id="game-mode-main-layout" className="z-10">
+              
+              {/* Header panel */}
+              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 mb-4 pb-4 border-b border-slate-800/60">
+                <div>
+                  <h4 className="font-bold text-slate-100 text-sm flex items-center gap-2">
+                    <Trophy className="w-4 h-4 text-yellow-400 fill-yellow-400/20" />
+                    <span>超初心者向け！勘所（かんどころ）あてゲーム</span>
+                  </h4>
+                  <p className="text-[11px] text-slate-400 mt-0.5">
+                    三線の音をマイクで感知して直感的に指を動かすさぁ！○❌と連続コンボを競おう！
+                  </p>
+                </div>
+
+                {/* Difficulty selector (Only shown when not playing or idle) */}
+                <div className="flex items-center gap-2 bg-slate-900 border border-slate-800/80 px-2 py-1 rounded-xl shrink-0 select-none">
+                  <span className="text-[10px] text-slate-400 font-bold">難易度:</span>
+                  <select
+                    disabled={gamePlayStatus === "playing" || gamePlayStatus === "success" || gamePlayStatus === "fail"}
+                    value={gameDifficulty}
+                    onChange={(e: any) => {
+                      setGameDifficulty(e.target.value);
+                      stopGameMode();
+                    }}
+                    className="bg-slate-950 text-xs text-amber-400 font-bold focus:outline-none cursor-pointer disabled:opacity-50"
+                  >
+                    <option value="beginner">初級 (開放弦：合・四・工)</option>
+                    <option value="easy">中級 (標準：四・上・中・工・五・六)</option>
+                    <option value="medium">上級 (実用：合〜工フル10キー)</option>
+                    <option value="hard">プロ級 (難関：尺・八・九含む)</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Game State Displays */}
+              {gamePlayStatus === "idle" ? (
+                /* IDLE / START SCREEN */
+                <div className="py-12 px-6 text-center select-none flex flex-col items-center justify-center">
+                  <div className="w-16 h-16 rounded-full bg-gradient-to-tr from-amber-500 to-yellow-450 flex items-center justify-center text-slate-950 font-black text-2xl shadow-lg shadow-amber-500/20 border-2 border-yellow-300 animate-bounce mb-4">
+                    🎮
+                  </div>
+                  <h5 className="text-lg font-bold text-amber-300">ちばりよー！三線勘所あてゲーム</h5>
+                  <p className="text-xs text-slate-350 max-w-sm mt-2 leading-relaxed">
+                    画面に表示されたお題の文字と、<strong>棹（フレット）の光る位置</strong>を見て、そこの弦を一本だけ「ペンッ♪」と弾いてみてねぇ。<br />
+                    おじぃがマイクから正しい音を自動検知して判定するさぁ！
+                  </p>
+                  
+                  {/* Stats review */}
+                  <div className="grid grid-cols-2 gap-4 w-full max-w-xs mt-6 bg-slate-950/40 p-4 rounded-xl border border-slate-800/60">
+                    <div className="text-center">
+                      <span className="text-[10px] text-slate-500 font-bold block">最高連続コンボ</span>
+                      <span className="text-xl font-black font-mono text-amber-400">{gameMaxCombo} <span className="text-xs">連続</span></span>
+                    </div>
+                    <div className="text-center">
+                      <span className="text-[10px] text-slate-500 font-bold block">トータル正解数</span>
+                      <span className="text-xl font-black font-mono text-emerald-400">{gameScore} <span className="text-xs">問</span></span>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={() => startGameMode(gameDifficulty)}
+                    className="mt-8 px-8 py-3 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 text-slate-950 font-bold rounded-xl shadow-lg shadow-amber-950/20 active:scale-95 transition-all text-sm uppercase tracking-wider flex items-center gap-2"
+                  >
+                    <Play size={16} fill="currentColor" />
+                    <span>ゲームを開始するさぁ！</span>
+                  </button>
+                </div>
+              ) : (
+                /* ACTIVE GAMEPLAY SCREEN */
+                <div className="grid grid-cols-1 md:grid-cols-12 gap-6 items-stretch">
+                  
+                  {/* Left Column: Visual Wooden Fret/Shao interface (5 Columns) */}
+                  <div className="md:col-span-5 flex flex-col items-center justify-center bg-slate-950/60 rounded-xl p-4 border border-zinc-800 relative z-10 min-h-[380px]">
+                    <span className="text-[9px] text-slate-500 font-mono tracking-widest uppercase mb-2">FINGERBOARD GUIDE</span>
+                    
+                    {/* Visual Shao (棹) container */}
+                    <div className="relative w-28 h-72 rounded-2xl bg-gradient-to-b from-amber-950 via-zinc-900 to-amber-950 border border-amber-900/30 shadow-[inset_0_0_15px_rgba(0,0,0,0.8)] overflow-visible">
+                      
+                      {/* String label headers (top) */}
+                      <div className="absolute -top-4 inset-x-0 flex justify-between px-3 text-[8px] text-slate-500 font-bold">
+                        <span>男(1)</span>
+                        <span>中(2)</span>
+                        <span>女(3)</span>
+                      </div>
+
+                      {/* Utaguchi (Nut) bridge bar representing standard top boundary */}
+                      <div className="absolute top-6 inset-x-0 h-1.5 bg-zinc-800 border-y border-amber-900/40 z-10 shadow-sm flex items-center justify-center">
+                        <div className="w-full h-0.5 bg-yellow-600/30"></div>
+                      </div>
+                      <span className="absolute top-2 left-1/2 -translate-x-1/2 text-[8px] text-amber-500 font-serif">歌口 (カラクイ)</span>
+
+                      {/* Three vertical strings (男, 中, 女) */}
+                      {/* Left: Low Male, Center: Mid Naka, Right: High Female */}
+                      <div className="absolute inset-y-0 left-4 w-1 bg-yellow-650/40 border-l border-amber-500/50" title="Low String"></div>
+                      <div className="absolute inset-y-0 left-1/2 -translate-x-0.5 w-0.5 bg-yellow-600/30 border-l border-amber-500/40" title="Mid String"></div>
+                      <div className="absolute inset-y-0 right-4 w-0.5 bg-yellow-500/20 border-l border-amber-500/30" title="High String"></div>
+
+                      {/* Fret/Tzuma horizontal line guides */}
+                      {/* Jo/Otsu height: index 1 */}
+                      <div className="absolute top-20 inset-x-0 h-0.5 border-t border-slate-700/20 z-0"></div>
+                      <span className="absolute top-[75px] left-1 text-[8px] text-slate-600">上のマ</span>
+
+                      {/* Chu/Ro height: index 2 */}
+                      <div className="absolute top-36 inset-x-0 h-0.5 border-t border-slate-700/20 z-0"></div>
+                      <span className="absolute top-[138px] left-1 text-[8px] text-slate-600">中のマ</span>
+
+                      {/* Shaku/Go height: index 3 */}
+                      <div className="absolute top-52 inset-x-0 h-0.5 border-t border-slate-700/20 z-0"></div>
+                      <span className="absolute top-[200px] left-1 text-[8px] text-slate-600">下のマ</span>
+
+                      {/* Roku/Seven index height: index 4 */}
+                      <div className="absolute top-64 inset-x-0 h-0.5 border-t border-slate-700/20 z-0"></div>
+
+                      {/* DYNAMIC TARGET PLACEMENT SPOTLIGHT */}
+                      {(() => {
+                        const targetMeta = KUNKUNSHI_MAP[gameTargetNote];
+                        if (!targetMeta) return null;
+
+                        const isNoPress = targetMeta.fingerIndex === 0;
+                        
+                        // X positions corresponding to the strings
+                        let targetLeft = "50%";
+                        if (targetMeta.stringIndex === 0) targetLeft = "16px";
+                        else if (targetMeta.stringIndex === 1) targetLeft = "50%";
+                        else if (targetMeta.stringIndex === 2) targetLeft = "96px";
+
+                        // Y position corresponding to height intervals (Finger indexing)
+                        let targetTop = "0px";
+                        if (targetMeta.fingerIndex === 1) targetTop = "80px";
+                        else if (targetMeta.fingerIndex === 2) targetTop = "144px";
+                        else if (targetMeta.fingerIndex === 3) targetTop = "208px";
+                        else if (targetMeta.fingerIndex === 4) targetTop = "256px";
+                        else if (targetMeta.fingerIndex === 5) targetTop = "274px";
+
+                        if (isNoPress) {
+                          // Open string requires no fret height, sits comfortably above nut
+                          return (
+                            <div 
+                              className="absolute -top-2 flex flex-col items-center justify-center -translate-x-1/2 animate-bounce z-20"
+                              style={{ left: targetLeft }}
+                            >
+                              <div className="w-6 h-6 rounded-full bg-emerald-500 text-slate-950 flex items-center justify-center text-[10px] font-black border-2 border-emerald-300 shadow-[0_0_12px_rgba(16,185,129,0.8)] animate-pulse">
+                                {targetMeta.char}
+                              </div>
+                              <span className="text-[7px] text-emerald-400 font-bold bg-slate-950 px-1 py-0.5 rounded mt-0.5 whitespace-nowrap">
+                                押さえない！
+                              </span>
+                            </div>
+                          );
+                        }
+
+                        // Position pressed height notes with pulse wave animations
+                        return (
+                          <div 
+                            className="absolute -translate-x-1/2 -translate-y-1/2 z-20 group"
+                            style={{ left: targetLeft, top: targetTop }}
+                          >
+                            {/* Pulse rings */}
+                            <div className="absolute -inset-2 rounded-full bg-amber-500 animate-ping opacity-35"></div>
+                            <div className="absolute -inset-1.5 rounded-full bg-yellow-400 animate-pulse opacity-50"></div>
+                            
+                            {/* Main core peg */}
+                            <div className="w-7 h-7 rounded-full bg-gradient-to-tr from-amber-500 to-yellow-400 text-slate-950 font-black text-xs flex items-center justify-center border-2 border-white shadow-[0_0_15px_rgba(245,158,11,0.9)] transition-transform group-hover:scale-110">
+                              {targetMeta.char}
+                            </div>
+                            
+                            {/* Popover advisor label for exact finger */}
+                            <div className="absolute left-8 -top-1.5 bg-amber-500/90 hover:bg-amber-400 text-slate-950 px-1.5 py-0.5 rounded-md text-[8px] font-black whitespace-nowrap shadow-md shadow-slate-950 border border-yellow-200">
+                              {targetMeta.fingerIndex === 1 ? "☝️ 人差し指" : targetMeta.fingerIndex === 2 ? "🖕 中指" : targetMeta.fingerIndex === 3 ? "🤙 薬指" : "🤙 小指"}
+                            </div>
+                          </div>
+                        );
+                      })()}
+                    </div>
+
+                    {/* Footer guide text */}
+                    {(() => {
+                      const targetMeta = KUNKUNSHI_MAP[gameTargetNote];
+                      if (!targetMeta) return null;
+                      
+                      const stringName = targetMeta.stringIndex === 0 ? "一の弦:男弦 (太弦)" : targetMeta.stringIndex === 1 ? "二の弦:中弦 (中線)" : "三の弦:女弦 (細弦)";
+                      const pressGuide = targetMeta.fingerIndex === 0 
+                        ? "左手はどこも押さえずに、その弦だけを右手爪で弾いてね！" 
+                        : `弦の「${targetMeta.fingerIndex === 1 ? "上のツマ" : targetMeta.fingerIndex === 2 ? "中のツマ" : "下のツマ"}」を ${targetMeta.fingerIndex === 1 ? "人差し指" : targetMeta.fingerIndex === 2 ? "中指" : "小指や薬指"} の腹でギュッと押さえて弾くさぁ！`;
+
+                      return (
+                        <div className="mt-4 text-center max-w-[200px] bg-slate-900/80 p-2.5 rounded-xl border border-zinc-800/80 select-none">
+                          <span className="text-[10px] text-amber-400 font-bold block">{stringName}</span>
+                          <span className="text-[9px] text-slate-300 block mt-1 leading-normal">{pressGuide}</span>
+                        </div>
+                      );
+                    })()}
+                  </div>
+
+                  {/* Right Column: Game Question Area and Controls (7 Columns) */}
+                  <div className="md:col-span-7 flex flex-col justify-between bg-slate-900/30 rounded-xl p-5 border border-slate-800/60 relative">
+                    
+                    {/* Time limit progress gauge at absolute top */}
+                    <div className="absolute top-0 inset-x-0 h-1 bg-slate-950 overflow-hidden rounded-t-xl select-none">
+                      <div 
+                        className={`h-full transition-all duration-1000 ${
+                          gameTimeLeft <= 3 ? "bg-red-500 animate-pulse" : gameTimeLeft <= 6 ? "bg-amber-500" : "bg-emerald-500"
+                        }`}
+                        style={{ width: `${(gameTimeLeft / (gameDifficulty === "beginner" ? 20 : gameDifficulty === "easy" ? 15 : gameDifficulty === "medium" ? 12 : 8)) * 100}%` }}
+                      ></div>
+                    </div>
+
+                    {/* Question Display Grid */}
+                    <div className="text-center py-4 relative">
+                      <span className="text-[10px] text-slate-500 tracking-widest font-mono block uppercase">ACTIVE TARGET QUESTION</span>
+                      
+                      {/* Big Target Pitch Letter */}
+                      <div className="relative inline-block my-3 select-none">
+                        
+                        {/* Dynamic Success particles ring */}
+                        {gamePlayStatus === "success" && (
+                          <div className="absolute -inset-4 rounded-full border border-emerald-400 animate-ping opacity-75"></div>
+                        )}
+
+                        <div 
+                          className={`w-32 h-32 rounded-3xl flex flex-col items-center justify-center border-4 shadow-2xl transition-all duration-250 ${
+                            gamePlayStatus === "success"
+                              ? "bg-emerald-950/80 text-emerald-400 border-emerald-400 scale-105 shadow-emerald-950/20"
+                              : gamePlayStatus === "fail"
+                                ? "bg-red-950/80 text-red-400 border-red-500 animate-shake shadow-red-950/20"
+                                : "bg-slate-950/90 text-amber-300 border-slate-800 shadow-slate-950/40"
+                          }`}
+                        >
+                          <span className="text-[11px] font-mono text-slate-500 leading-none">
+                            {KUNKUNSHI_MAP[gameTargetNote]?.english || "Koshu"}
+                          </span>
+                          <span className="text-6xl font-black font-serif my-1 leading-none">
+                            {gameTargetNote}
+                          </span>
+                          <span className="text-[10px] text-slate-400 tracking-wider">
+                            {KUNKUNSHI_MAP[gameTargetNote]?.stringIndex === 0 ? "男弦 (Lowest)" : KUNKUNSHI_MAP[gameTargetNote]?.stringIndex === 1 ? "中弦 (Middle)" : "女弦 (Highest)"}
+                          </span>
+                        </div>
+
+                        {/* Visual checkmarks overlay pop-up */}
+                        {gamePlayStatus === "success" && (
+                          <div className="absolute -top-2 -right-2 text-emerald-400 bg-slate-950 p-1.5 rounded-full border border-emerald-500 animate-bounce">
+                            <Sparkles className="w-5 h-5 fill-emerald-500" />
+                          </div>
+                        )}
+                        {gamePlayStatus === "fail" && (
+                          <div className="absolute -top-2 -right-2 text-red-400 bg-slate-950 px-2 py-0.5 rounded-full border border-red-500 text-xs font-black animate-pulse font-serif">
+                            ❌
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Numeric Timer gauge */}
+                      <div className="flex items-center justify-center gap-1.5 text-xs text-slate-400">
+                        <Timer size={13} className={gameTimeLeft <= 3 ? "text-red-500 animate-spin" : "text-slate-400"} />
+                        <span>残り時間: <strong className={`font-mono text-sm ${gameTimeLeft <= 3 ? "text-red-500 font-black animate-pulse" : "text-amber-400"}`}>{gameTimeLeft}</strong> 秒</span>
+                      </div>
+                    </div>
+
+                    {/* Live Coach Feedback Box */}
+                    <div className="bg-slate-950/80 p-3.5 rounded-xl border border-slate-800 text-xs leading-relaxed min-h-[72px] flex items-center justify-center mb-4 transition-all duration-300">
+                      <p className="text-center">
+                        {gamePlayStatus === "success" ? (
+                          <span className="text-emerald-400 font-bold flex items-center gap-1.5 justify-center">
+                            <CheckCircle2 size={14} className="animate-spin" />
+                            {gameFeedback}
+                          </span>
+                        ) : gamePlayStatus === "fail" ? (
+                          <span className="text-red-400 font-semibold">{gameFeedback}</span>
+                        ) : (
+                          <span className="text-slate-350">{gameFeedback}</span>
+                        )}
+                      </p>
+                    </div>
+
+                    {/* Stats Dashboard Grid */}
+                    <div className="grid grid-cols-3 gap-2 bg-slate-950/40 p-2.5 rounded-xl border border-slate-800 mb-4 select-none">
+                      <div className="text-center py-1">
+                        <span className="text-[9px] text-slate-500 block font-bold">連続正解</span>
+                        <span className="text-sm font-black font-mono text-amber-400 flex items-center justify-center gap-0.5">
+                          <Zap size={10} className="fill-amber-500 text-amber-500 animate-pulse" />
+                          {gameCombo}回
+                        </span>
+                      </div>
+                      <div className="text-center py-1">
+                        <span className="text-[9px] text-slate-500 block font-bold">全回答数</span>
+                        <span className="text-sm font-bold font-mono text-slate-200">
+                          {gameScore} <span className="text-[10px] text-slate-400">/ {gameTotalTurns}</span>
+                        </span>
+                      </div>
+                      <div className="text-center py-1">
+                        <span className="text-[9px] text-slate-500 block font-bold">レベル</span>
+                        <span className="text-sm font-black font-mono text-emerald-400">
+                          Lv.{gameLevel}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Action buttons list */}
+                    <div className="grid grid-cols-2 gap-3">
+                      <button
+                        onClick={playReferencedGameNote}
+                        className="px-3 py-2 text-xs font-bold text-slate-300 bg-slate-950 hover:bg-slate-900 border border-slate-800 rounded-xl flex items-center justify-center gap-1.5 transition-all outline-none"
+                        title="お手本の音を再生"
+                      >
+                        <Volume2 size={13} />
+                        <span>お手本の音を聴く</span>
+                      </button>
+
+                      <button
+                        onClick={stopGameMode}
+                        className="px-3 py-2 text-xs font-bold text-red-450 bg-red-950/15 hover:bg-red-950/30 border border-red-900/40 rounded-xl flex items-center justify-center gap-1.5 transition-all outline-none"
+                      >
+                        <RotateCcw size={13} />
+                        <span>リセット</span>
+                      </button>
+                    </div>
+
+                  </div>
+                </div>
+              )}
+
+              {/* Higa Grandpa Game Advice card */}
+              <div className="mt-5 p-3.5 bg-slate-950/40 rounded-xl border border-slate-800/80 text-[11px] text-slate-400 leading-relaxed">
+                <span className="text-yellow-400 font-bold block mb-1">👴 おじぃの耳より情報：</span>
+                「ゲームは焦らず、一本ずつ綺麗に音を出すのがコツさぁ。合、四、工は弦を押さえずにそのまま弾く、乙、上、五は人差し指でツボをキュッと押さえるさぁ。がんばるよー！」
+              </div>
+
             </div>
           </div>
         )}
